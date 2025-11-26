@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Route Planner with Altitude</title>
+    
+    <!-- Leaflet -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+    <!-- Leaflet Routing Machine -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet-routing-machine@3.2.12/dist/leaflet-routing-machine.css" />
+    <script src="https://unpkg.com/leaflet-routing-machine@3.2.12/dist/leaflet-routing-machine.js"></script>
+
+    <!-- Leaflet Control Geocoder -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet-control-geocoder/dist/Control.Geocoder.css" />
+    <script src="https://unpkg.com/leaflet-control-geocoder/dist/Control.Geocoder.js"></script>
+
+    <!-- Chart.js for Elevation Profile -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+    <style>
+        body { margin: 0; padding: 0; display: flex; flex-direction: column; height: 100vh; font-family: sans-serif; }
+        #map { flex: 1; }
+        #elevation-container { 
+            height: 250px; /* Increased height for legend */
+            background: #fff; 
+            border-top: 1px solid #ccc; 
+            padding: 10px;
+            box-sizing: border-box;
+            display: none;
+            position: relative;
+        }
+        #elevation-msg {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: #666;
+        }
+        #grade-stats {
+            position: absolute;
+            top: 50%;
+            left: 10px;
+            transform: translateY(-50%);
+            background: white;
+            padding: 10px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.2);
+            z-index: 1000;
+            display: none;
+            min-width: 200px;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+        .route-stat-group {
+            border-bottom: 1px solid #eee;
+            padding-bottom: 8px;
+            margin-bottom: 8px;
+        }
+        .route-stat-group:last-child { border-bottom: none; margin-bottom: 0; }
+        .route-title { font-weight: bold; font-size: 0.9em; margin-bottom: 4px; display: flex; align-items: center; }
+        .color-dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; margin-right: 6px; }
+        .stat-row { display: flex; justify-content: space-between; font-size: 0.85em; }
+        .downhill { color: #28a745; font-weight: bold; }
+        .uphill { color: #dc3545; font-weight: bold; }
+        .leaflet-routing-container {
+            max-height: 400px;
+            overflow-y: auto;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="map"></div>
+    
+    <div id="grade-stats">
+        <!-- Stats will be injected here via JS -->
+    </div>
+
+    <div id="elevation-container">
+        <div id="elevation-msg"></div>
+        <canvas id="elevationChart"></canvas>
+    </div>
+
+    <script>
+        // 1. Initialize Map
+        const osmLayer = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: '© OpenStreetMap contributors'
+        });
+
+        // Google Map Layer with Traffic overlay
+        const googleTrafficLayer = L.tileLayer('https://{s}.google.com/vt/lyrs=m,traffic&x={x}&y={y}&z={z}', {
+            maxZoom: 20,
+            subdomains: ['mt0', 'mt1', 'mt2', 'mt3'],
+            attribution: '© Google'
+        });
+
+        const map = L.map('map', {
+            center: [41.176, 29.590], // Updated center to Şile, Turkey
+            zoom: 13,
+            layers: [osmLayer] // Default to OSM
+        });
+
+        // Add control to switch between layers
+        L.control.layers({
+            "OpenStreetMap": osmLayer,
+            "Google Traffic": googleTrafficLayer
+        }).addTo(map);
+
+        // Show coordinates on map click
+        map.on('click', function(e) {
+            L.popup()
+                .setLatLng(e.latlng)
+                .setContent(`Lat: ${e.latlng.lat.toFixed(5)}<br>Lng: ${e.latlng.lng.toFixed(5)}`)
+                .openOn(map);
+        });
+
+        // 2. Initialize Chart.js instance
+        let elevationChart = null;
+        const ctx = document.getElementById('elevationChart').getContext('2d');
+        const elevationContainer = document.getElementById('elevation-container');
+        const elevationMsg = document.getElementById('elevation-msg');
+        const gradeStatsContainer = document.getElementById('grade-stats');
+
+        // Define colors for different routes
+        const routeColors = ['#007bff', '#dc3545', '#28a745', '#ffc107', '#6f42c1'];
+
+        function showMessage(msg) {
+            elevationContainer.style.display = 'block';
+            elevationMsg.style.display = 'block';
+            elevationMsg.innerText = msg;
+            if (elevationChart) {
+                elevationChart.destroy();
+                elevationChart = null;
+            }
+        }
+
+        function updateChart(datasets) {
+            elevationContainer.style.display = 'block';
+            elevationMsg.style.display = 'none';
+
+            if (elevationChart) {
+                elevationChart.destroy();
+            }
+
+            elevationChart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    datasets: datasets
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        x: { 
+                            type: 'linear', // Use linear scale for distance comparison
+                            title: { display: true, text: 'Distance (km)' },
+                            ticks: { maxTicksLimit: 10 }
+                        },
+                        y: { 
+                            title: { display: true, text: 'Elevation (m)' } 
+                        }
+                    },
+                    plugins: {
+                        tooltip: { mode: 'nearest', intersect: false },
+                        title: { display: true, text: 'Route Elevation Comparison' },
+                        legend: { display: true, position: 'top' }
+                    },
+                    interaction: { mode: 'nearest', axis: 'x', intersect: false }
+                }
+            });
+        }
+
+        function updateGradeStatsUI(allStats) {
+            gradeStatsContainer.innerHTML = '';
+            
+            if (allStats.length === 0) {
+                gradeStatsContainer.style.display = 'none';
+                return;
+            }
+
+            allStats.forEach((stat, index) => {
+                const color = routeColors[index % routeColors.length];
+                const html = `
+                    <div class="route-stat-group">
+                        <div class="route-title">
+                            <span class="color-dot" style="background-color: ${color}"></span>
+                            ${stat.name} (${stat.totalDist} km)
+                        </div>
+                        <div class="stat-row">
+                            <span>Regen (Down): <span class="downhill">${stat.downPct}%</span></span>
+                            <span>Power (Up): <span class="uphill">${stat.upPct}%</span></span>
+                        </div>
+                    </div>
+                `;
+                gradeStatsContainer.innerHTML += html;
+            });
+            
+            gradeStatsContainer.style.display = 'block';
+        }
+
+        // 3. Helper to fetch elevation from Open-Elevation API
+        async function getElevationData(coordinates) {
+            // Sample coordinates to reduce payload size and stay within URL limits (Open-Meteo GET limit)
+            // Reduced to 80 to be safe with URL length limits
+            const maxPoints = 80;
+            const step = Math.max(1, Math.ceil(coordinates.length / maxPoints));
+            const sampledCoords = coordinates.filter((_, i) => i % step === 0);
+
+            const lats = sampledCoords.map(c => c.lat.toFixed(6)).join(',');
+            const lngs = sampledCoords.map(c => c.lng.toFixed(6)).join(',');
+            
+            try {
+                // Switch to Open-Meteo API (More reliable than Open-Elevation)
+                const response = await fetch(`https://api.open-meteo.com/v1/elevation?latitude=${lats}&longitude=${lngs}`);
+
+                if (!response.ok) throw new Error('Elevation API error: ' + response.statusText);
+                
+                const data = await response.json();
+                // Open-Meteo returns { elevation: [val1, val2, ...] }
+                return { elevations: data.elevation, sampledCoords }; 
+            } catch (e) {
+                console.error("Could not fetch elevation", e);
+                return null;
+            }
+        }
+
+        // 4. Routing Control
+        const control = L.Routing.control({
+            waypoints: [
+                L.latLng(41.16307, 29.57887), // Turkey, Şile, Kumbaba
+                L.latLng(41.16989, 29.61860)  // Turkey, Şile, Çavuş
+            ],
+            routeWhileDragging: true,
+            reverseWaypoints: true, 
+            showAlternatives: true, // Requirement: Alternative routes
+            // Explicitly use OSRM router to ensure configuration is correct
+            router: L.Routing.osrmv1({
+                serviceUrl: 'https://router.project-osrm.org/route/v1',
+                profile: 'driving'
+            }),
+            geocoder: L.Control.Geocoder.nominatim(), 
+            lineOptions: {
+                styles: [{color: routeColors[0], opacity: 0.8, weight: 6}]
+            },
+            altLineOptions: {
+                styles: [{color: '#6c757d', opacity: 0.6, weight: 4}] // Default grey for alts on map
+            }
+        }).addTo(map);
+
+        // 5. Handle Routes Found (Process ALL routes)
+        async function processRoutes(routes) {
+            console.log(`Found ${routes.length} routes.`);
+            showMessage("Loading elevation data for " + routes.length + " route(s)...");
+            gradeStatsContainer.style.display = 'none';
+            
+            const chartDatasets = [];
+            const statsData = [];
+
+            // Process each route sequentially to avoid overwhelming API
+            for (let i = 0; i < routes.length; i++) {
+                const route = routes[i];
+                const coordinates = route.coordinates;
+                const routeName = route.name || `Route ${i + 1}`;
+                const color = routeColors[i % routeColors.length];
+
+                // Fetch Elevation
+                const data = await getElevationData(coordinates);
+                
+                if (data && data.elevations) {
+                    const elevations = data.elevations;
+                    const sampledCoords = data.sampledCoords;
+                    
+                    // Calculate distances and stats
+                    const dataPoints = []; // {x: dist, y: elev}
+                    let currentDist = 0;
+                    let downhillDist = 0;
+                    let uphillDist = 0;
+
+                    for (let j = 0; j < sampledCoords.length; j++) {
+                        if (j > 0) {
+                            const distSeg = sampledCoords[j].distanceTo(sampledCoords[j-1]);
+                            currentDist += distSeg;
+                            
+                            const elevDiff = elevations[j] - elevations[j-1];
+                            if (elevDiff < 0) downhillDist += distSeg;
+                            else if (elevDiff > 0) uphillDist += distSeg;
+                        }
+                        dataPoints.push({ x: parseFloat((currentDist / 1000).toFixed(2)), y: elevations[j] });
+                    }
+
+                    // Prepare Chart Dataset
+                    chartDatasets.push({
+                        label: routeName,
+                        data: dataPoints,
+                        borderColor: color,
+                        backgroundColor: color + '33', // Transparent fill
+                        fill: false,
+                        tension: 0.4,
+                        pointRadius: 0,
+                        borderWidth: 2
+                    });
+
+                    // Prepare Stats
+                    const totalDist = currentDist;
+                    statsData.push({
+                        name: routeName,
+                        totalDist: (totalDist / 1000).toFixed(1),
+                        downPct: totalDist > 0 ? ((downhillDist / totalDist) * 100).toFixed(0) : 0,
+                        upPct: totalDist > 0 ? ((uphillDist / totalDist) * 100).toFixed(0) : 0
+                    });
+                } else {
+                    console.warn(`Failed to get elevation for route ${i}`);
+                }
+            }
+
+            if (chartDatasets.length > 0) {
+                updateChart(chartDatasets);
+                updateGradeStatsUI(statsData);
+            } else {
+                showMessage("No elevation data available. (API might be unreachable or route too short)");
+            }
+        }
+
+        control.on('routesfound', function(e) {
+            // Process all found routes
+            processRoutes(e.routes);
+        });
+        
+        // Removed 'routeselected' listener to prevent overriding the comparison view
+    </script>
+</body>
+</html>
