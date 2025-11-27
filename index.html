@@ -62,6 +62,17 @@
         .route-stat-group:last-child { border-bottom: none; margin-bottom: 0; }
         .route-title { font-weight: bold; font-size: 0.9em; margin-bottom: 4px; display: flex; align-items: center; }
         .color-dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; margin-right: 6px; }
+        .score-badge {
+            background: #333;
+            color: #fff;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-size: 0.85em;
+            margin-right: 8px;
+            font-weight: bold;
+            min-width: 24px;
+            text-align: center;
+        }
         .stat-row { display: flex; justify-content: space-between; font-size: 0.85em; }
         .downhill { color: #28a745; font-weight: bold; }
         .uphill { color: #dc3545; font-weight: bold; }
@@ -181,12 +192,16 @@
                 return;
             }
 
+            // Sort by score descending to show best route first? 
+            // Or keep map order? Let's keep map order but highlight score.
+            
             allStats.forEach((stat, index) => {
                 const color = routeColors[index % routeColors.length];
                 const html = `
                     <div class="route-stat-group">
                         <div class="route-title">
                             <span class="color-dot" style="background-color: ${color}"></span>
+                            <span class="score-badge" title="Efficiency Score (0-10)">${stat.score}</span>
                             ${stat.name} (${stat.totalDist} km)
                         </div>
                         <div class="stat-row">
@@ -303,11 +318,14 @@
                         borderWidth: 2
                     });
 
-                    // Prepare Stats
+                    // Prepare Stats (Store raw values for score calc)
                     const totalDist = currentDist;
                     statsData.push({
                         name: routeName,
                         totalDist: (totalDist / 1000).toFixed(1),
+                        rawDist: totalDist,
+                        rawDown: downhillDist,
+                        rawUp: uphillDist,
                         downPct: totalDist > 0 ? ((downhillDist / totalDist) * 100).toFixed(0) : 0,
                         upPct: totalDist > 0 ? ((uphillDist / totalDist) * 100).toFixed(0) : 0
                     });
@@ -316,7 +334,32 @@
                 }
             }
 
-            if (chartDatasets.length > 0) {
+            // Calculate Scores
+            if (statsData.length > 0) {
+                // Find shortest distance for baseline
+                const minDist = Math.min(...statsData.map(s => s.rawDist));
+
+                statsData.forEach(stat => {
+                    // 1. Distance Score (Base 10): Shorter is better. 
+                    // If route is 2x longer than shortest, score drops to 5.
+                    const distScore = (minDist / stat.rawDist) * 10;
+
+                    // 2. Gradient Score: Net Regen Factor
+                    // (Down - Up) / Total. 
+                    // Positive means net downhill (good). Negative means net uphill (bad).
+                    // Multiplier 20 gives it reasonable weight (e.g. 5% net diff = +/- 1 point)
+                    const netGradient = (stat.rawDown - stat.rawUp) / stat.rawDist;
+                    const gradScore = netGradient * 20;
+
+                    // Final Score
+                    let finalScore = distScore + gradScore;
+                    
+                    // Clamp to 0-10 range (allow slightly over 10 for exceptional downhill routes)
+                    finalScore = Math.max(0, Math.min(10, finalScore));
+                    
+                    stat.score = finalScore.toFixed(1);
+                });
+
                 updateChart(chartDatasets);
                 updateGradeStatsUI(statsData);
             } else {
