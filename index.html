@@ -23,6 +23,18 @@
     <style>
         body { margin: 0; padding: 0; display: flex; flex-direction: column; height: 100vh; font-family: sans-serif; }
         #map { flex: 1; }
+        #route-options {
+            position: absolute;
+            top: 10px;
+            left: 50%; /* Center horizontally */
+            transform: translateX(-50%);
+            background: white;
+            padding: 10px;
+            border-radius: 5px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.4);
+            z-index: 1000;
+            border: 1px solid #ccc;
+        }
         #elevation-container { 
             height: 250px; /* Increased height for legend */
             background: #fff; 
@@ -80,11 +92,21 @@
             max-height: 400px;
             overflow-y: auto;
         }
+        .hover-marker {
+            position: relative;
+            z-index: 1000;
+        }
     </style>
 </head>
 <body>
 
     <div id="map"></div>
+    
+    <div id="route-options">
+        <label style="font-weight: bold; cursor: pointer;">
+            <input type="checkbox" id="avoid-tolls"> Avoid Tolls
+        </label>
+    </div>
     
     <div id="grade-stats">
         <!-- Stats will be injected here via JS -->
@@ -114,6 +136,17 @@
             layers: [osmLayer] // Default to OSM
         });
 
+        // Marker for showing chart hover position on map
+        const hoverMarker = L.marker([0, 0], {
+            icon: L.divIcon({
+                className: 'hover-marker',
+                html: '<div style="width: 10px; height: 10px; background: red; border-radius: 50%; border: 2px solid white;"></div>',
+                iconSize: [14, 14],
+                iconAnchor: [7, 7]
+            })
+        }).addTo(map);
+        hoverMarker.setOpacity(0); // Hide initially
+
         // Add control to switch between layers
         L.control.layers({
             "OpenStreetMap": osmLayer,
@@ -138,6 +171,25 @@
         // Define colors for different routes
         const routeColors = ['#007bff', '#dc3545', '#28a745', '#ffc107', '#6f42c1'];
 
+        // Custom Router to support exclude parameter (e.g. tolls)
+        L.Routing.OSRMv1WithExclude = L.Routing.OSRMv1.extend({
+            options: {
+                exclude: null // e.g., 'toll'
+            },
+            buildRouteUrl: function(waypoints, options) {
+                var url = L.Routing.OSRMv1.prototype.buildRouteUrl.call(this, waypoints, options);
+                
+                // Only append if exclude is set and not empty
+                if (this.options.exclude) {
+                    var separator = url.indexOf('?') === -1 ? '?' : '&';
+                    url += separator + 'exclude=' + this.options.exclude;
+                }
+                
+                console.log('Generated Route URL:', url);
+                return url;
+            }
+        });
+
         function showMessage(msg) {
             elevationContainer.style.display = 'block';
             elevationMsg.style.display = 'block';
@@ -148,7 +200,7 @@
             }
         }
 
-        function updateChart(datasets) {
+        function updateChart(datasets, allSampledCoords) {
             elevationContainer.style.display = 'block';
             elevationMsg.style.display = 'none';
 
@@ -166,7 +218,7 @@
                     maintainAspectRatio: false,
                     scales: {
                         x: { 
-                            type: 'linear', // Use linear scale for distance comparison
+                            type: 'linear', 
                             title: { display: true, text: 'Distance (km)' },
                             ticks: { maxTicksLimit: 10 }
                         },
@@ -175,11 +227,34 @@
                         }
                     },
                     plugins: {
-                        tooltip: { mode: 'nearest', intersect: false },
+                        tooltip: { 
+                            mode: 'nearest', 
+                            intersect: false,
+                            callbacks: {
+                                label: function(context) {
+                                    return `${context.dataset.label}: ${context.parsed.y}m`;
+                                }
+                            }
+                        },
                         title: { display: true, text: 'Route Elevation Comparison' },
                         legend: { display: true, position: 'top' }
                     },
-                    interaction: { mode: 'nearest', axis: 'x', intersect: false }
+                    interaction: { mode: 'nearest', axis: 'x', intersect: false },
+                    onHover: (event, elements) => {
+                        if (elements && elements.length > 0) {
+                            const index = elements[0].index;
+                            const datasetIndex = elements[0].datasetIndex;
+                            
+                            // Get coordinates for this point
+                            if (allSampledCoords && allSampledCoords[datasetIndex] && allSampledCoords[datasetIndex][index]) {
+                                const latlng = allSampledCoords[datasetIndex][index];
+                                hoverMarker.setLatLng(latlng);
+                                hoverMarker.setOpacity(1);
+                            }
+                        } else {
+                            hoverMarker.setOpacity(0);
+                        }
+                    }
                 }
             });
         }
@@ -249,12 +324,13 @@
                 L.latLng(41.16989, 29.61860)  // Turkey, Şile, Çavuş
             ],
             routeWhileDragging: true,
-            reverseWaypoints: true, 
+            reverseWaypoints: true, // This ensures inputs are filled when markers move
             showAlternatives: true, // Requirement: Alternative routes
-            // Explicitly use OSRM router to ensure configuration is correct
-            router: L.Routing.osrmv1({
+            // Explicitly use Custom OSRM router
+            router: new L.Routing.OSRMv1WithExclude({
                 serviceUrl: 'https://router.project-osrm.org/route/v1',
-                profile: 'driving'
+                profile: 'driving',
+                exclude: null
             }),
             geocoder: L.Control.Geocoder.nominatim(), 
             lineOptions: {
@@ -262,8 +338,90 @@
             },
             altLineOptions: {
                 styles: [{color: '#6c757d', opacity: 0.6, weight: 4}] // Default grey for alts on map
+            },
+            createMarker: function(i, wp, nWps) {
+                // Create a standard Leaflet marker
+                const marker = L.marker(wp.latLng, {
+                    draggable: true,
+                    icon: L.icon({
+                        iconUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png',
+                        shadowUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png',
+                        iconSize: [25, 41],
+                        iconAnchor: [12, 41],
+                        popupAnchor: [1, -34],
+                        shadowSize: [41, 41]
+                    })
+                });
+
+                // Add a popup with a remove button
+                marker.bindPopup(function() {
+                    const container = document.createElement('div');
+                    const btn = document.createElement('button');
+                    btn.innerText = 'Remove Waypoint';
+                    btn.style.backgroundColor = '#dc3545';
+                    btn.style.color = 'white';
+                    btn.style.border = 'none';
+                    btn.style.padding = '5px 10px';
+                    btn.style.cursor = 'pointer';
+                    btn.style.borderRadius = '4px';
+                    
+                    btn.onclick = function() {
+                        control.spliceWaypoints(i, 1);
+                        map.closePopup();
+                    };
+                    
+                    container.appendChild(btn);
+                    return container;
+                });
+
+                return marker;
             }
         }).addTo(map);
+
+        // Handle Toll Checkbox
+        document.getElementById('avoid-tolls').addEventListener('change', function(e) {
+            const router = control.getRouter();
+            // OSRM uses 'toll' (singular) for the exclude parameter
+            router.options.exclude = e.target.checked ? 'toll' : null;
+            console.log('Toggling tolls. Exclude:', router.options.exclude);
+            control.route(); // Recalculate route
+        });
+
+        // Handle Routing Errors
+        control.on('routingerror', function(e) {
+            console.error('Routing error event:', e);
+            let msg = "Routing Error: ";
+            
+            // Attempt to parse OSRM error response
+            if (e.error && e.error.responseText) {
+                try {
+                    const response = JSON.parse(e.error.responseText);
+                    if (response.message) {
+                        msg += response.message;
+                    }
+                    // Check for specific OSRM error regarding exclude flags
+                    if (response.code === 'InvalidValue' && response.message.includes('Exclude')) {
+                        msg += "<br><br><strong>Note:</strong> The free public routing server does not support avoiding tolls. Please uncheck the box.";
+                        
+                        // Automatically reset the UI to prevent getting stuck
+                        document.getElementById('avoid-tolls').checked = false;
+                        control.getRouter().options.exclude = null;
+                        
+                        // Optional: Retry automatically after a short delay
+                        // setTimeout(() => control.route(), 2000);
+                    }
+                } catch (err) {
+                    msg += "HTTP " + e.error.status;
+                }
+            } else if (e.error && e.error.message) {
+                msg += e.error.message;
+            } else if (e.error && e.error.status) {
+                msg += "HTTP Status " + e.error.status;
+            } else {
+                msg += "Unknown error (check console)";
+            }
+            showMessage(msg);
+        });
 
         // 5. Handle Routes Found (Process ALL routes)
         async function processRoutes(routes) {
@@ -273,6 +431,7 @@
             
             const chartDatasets = [];
             const statsData = [];
+            const allSampledCoords = []; // Store coords for chart interaction
 
             // Process each route sequentially to avoid overwhelming API
             for (let i = 0; i < routes.length; i++) {
@@ -287,6 +446,7 @@
                 if (data && data.elevations) {
                     const elevations = data.elevations;
                     const sampledCoords = data.sampledCoords;
+                    allSampledCoords.push(sampledCoords); // Save for interaction
                     
                     // Calculate distances and stats
                     const dataPoints = []; // {x: dist, y: elev}
@@ -314,7 +474,8 @@
                         backgroundColor: color + '33', // Transparent fill
                         fill: false,
                         tension: 0.4,
-                        pointRadius: 0,
+                        pointRadius: 0, // Hide points by default
+                        pointHoverRadius: 6, // Show on hover
                         borderWidth: 2
                     });
 
@@ -331,6 +492,7 @@
                     });
                 } else {
                     console.warn(`Failed to get elevation for route ${i}`);
+                    allSampledCoords.push([]); // Keep index sync
                 }
             }
 
@@ -360,19 +522,52 @@
                     stat.score = finalScore.toFixed(1);
                 });
 
-                updateChart(chartDatasets);
+                updateChart(chartDatasets, allSampledCoords);
                 updateGradeStatsUI(statsData);
             } else {
                 showMessage("No elevation data available. (API might be unreachable or route too short)");
             }
         }
 
+        // Map Hover Interaction (Map -> Chart)
+        map.on('mousemove', function(e) {
+            if (!elevationChart || !globalSampledCoords.length) return;
+
+            let minDistance = Infinity;
+            let bestMatch = null;
+
+            // Iterate all routes
+            globalSampledCoords.forEach((routeCoords, datasetIndex) => {
+                routeCoords.forEach((coord, index) => {
+                    const dist = e.latlng.distanceTo(coord);
+                    if (dist < minDistance) {
+                        minDistance = dist;
+                        bestMatch = { datasetIndex, index };
+                    }
+                });
+            });
+
+            // If close enough (e.g. 500 meters to account for sampling gaps)
+            if (minDistance < 500 && bestMatch) {
+                const meta = elevationChart.getDatasetMeta(bestMatch.datasetIndex);
+                const point = meta.data[bestMatch.index];
+                
+                if (point) {
+                    elevationChart.setActiveElements([{ datasetIndex: bestMatch.datasetIndex, index: bestMatch.index }]);
+                    elevationChart.tooltip.setActiveElements([{ datasetIndex: bestMatch.datasetIndex, index: bestMatch.index }]);
+                    elevationChart.update();
+                }
+            } else {
+                elevationChart.setActiveElements([]);
+                elevationChart.tooltip.setActiveElements([]);
+                elevationChart.update();
+            }
+        });
+
         control.on('routesfound', function(e) {
             // Process all found routes
             processRoutes(e.routes);
         });
-        
-        // Removed 'routeselected' listener to prevent overriding the comparison view
     </script>
 </body>
 </html>
